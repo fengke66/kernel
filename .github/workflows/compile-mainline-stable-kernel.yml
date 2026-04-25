@@ -2,8 +2,6 @@ name: compile-mainline-stable-kernel
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: '0 0 * * 5'
 
 env:
   TZ: Asia/Shanghai
@@ -23,21 +21,20 @@ jobs:
         run: |
           sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo -E apt-get -qq update
-          # 在原版基础上增加了 dwarves (pahole)，这是生成 BTF (daed 依赖) 的核心工具
+          # 【核心】必须安装 dwarves (pahole)，否则无法生成 daed 依赖的 BTF 模块
           sudo -E apt-get -qq install -y build-essential flex bison libssl-dev libelf-dev dwarves zstd bc python3-dev python3-pip git wget curl
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
           sudo timedatectl set-timezone "$TZ"
 
-      - name: Configure Kernel Features (For daed & FullCone)
+      - name: Inject daed & FullCone Configs
         run: |
-          # 针对你指定的 config-6.18 文件进行修改
+          # 针对你指定的 6.18 配置文件进行修改
           CONF_FILE="kernel-config/release/stable/config-6.18"
           
           if [ -f "$CONF_FILE" ]; then
-            echo "--- 正在集成 daed 和 FullCone NAT 依赖选项 ---"
-            
-            # 解决 kmod-sched-bpf 和 kmod-xdp-sockets-diag (daed 依赖)
+            echo "--- 开始注入依赖配置 ---"
+            # 解决 kmod-sched-bpf, kmod-xdp-sockets-diag (daed 依赖)
             sed -i '/CONFIG_BPF_SYSCALL/d' $CONF_FILE
             sed -i '/CONFIG_DEBUG_INFO_BTF/d' $CONF_FILE
             echo "CONFIG_BPF_SYSCALL=y" >> $CONF_FILE
@@ -52,10 +49,9 @@ jobs:
             # 解决 kmod-ipt-fullconenat
             sed -i '/CONFIG_IP_NF_TARGET_FULLCONENAT/d' $CONF_FILE
             echo "CONFIG_IP_NF_TARGET_FULLCONENAT=m" >> $CONF_FILE
-            
-            echo "--- 配置注入完成 ---"
+            echo "--- 注入完成 ---"
           else
-            echo "错误: 找不到配置文件 $CONF_FILE"
+            echo "错误: 找不到文件 $CONF_FILE"
             exit 1
           fi
 
@@ -63,14 +59,13 @@ jobs:
         uses: ophub/amlogic-s9xxx-armbian@main
         with:
           build_target: kernel
-          # 确保这里对应 6.18
           kernel_version: 6.18.y
           kernel_auto: true
-          # 增加自定义签名便于在系统查看
-          kernel_sign: -S912-daed-fullcone
+          # 自定义签名，刷入后在系统里看到这个后缀就说明成功了
+          kernel_sign: -S912-daed-fullconenat
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: S912-Kernel-6.18-Standard
+          name: S912-Kernel-6.18-Stable
           path: output/kernel/*
