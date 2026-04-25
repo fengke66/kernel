@@ -2,6 +2,9 @@ name: compile-mainline-stable-kernel
 
 on:
   workflow_dispatch:
+  # 保持原有的定时或推送触发逻辑（如果原版有的话）
+  # schedule:
+  #   - cron: '0 0 * * 5'
 
 env:
   TZ: Asia/Shanghai
@@ -21,7 +24,7 @@ jobs:
         run: |
           sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo -E apt-get -qq update
-          # 必须安装 dwarves (包含 pahole) 才能解决 daed 的 BTF 依赖问题
+          # 在原版基础上增加了 dwarves (用于生成 BTF)，这是解决 daed 依赖的核心
           sudo -E apt-get -qq install -y build-essential flex bison libssl-dev libelf-dev dwarves zstd bc python3-dev python3-pip git wget curl
           sudo -E apt-get -qq autoremove --purge
           sudo -E apt-get -qq clean
@@ -29,57 +32,58 @@ jobs:
 
       - name: Download kernel source
         run: |
-          # 克隆主线内核源码
-          git clone --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git -b linux-6.6.y linux
-          
+          # 保持原版下载逻辑，这里以 6.18.y 为例
+          git clone --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git -b linux-6.18.y linux
+
       - name: Integrate FullCone NAT Support
         run: |
           cd linux
-          # 使用 curl 下载 master 分支的压缩包，彻底避免 git clone 的 Username 报错
+          # 使用 curl 下载源码包避开 git clone 权限错误 (exit code 128)
           curl -L https://github.com/Lienol/openwrt-fullconenat/archive/refs/heads/master.tar.gz -o fullconenat.tar.gz
           mkdir -p net/netfilter/fullconenat
           tar -xzvf fullconenat.tar.gz -C net/netfilter/fullconenat --strip-components=1
           
-          # 将插件集成进内核编译树
-          # 如果 Makefile 中没有 NETMAP，则添加到结尾
+          # 修改内核 Makefile 和 Kconfig 挂载补丁
           echo "obj-\$(CONFIG_IP_NF_TARGET_FULLCONENAT) += fullconenat/ipt_FULLCONENAT.o" >> net/ipv4/netfilter/Makefile
-          # 将 Kconfig 注入
           sed -i '/menu "IP: Netfilter Configuration"/a source "net/netfilter/fullconenat/Kconfig"' net/ipv4/netfilter/Kconfig
 
       - name: Configure Kernel Features (For daed & Docker)
         run: |
+          # 这里的路径对应你之前提到的 kernel-config 路径
+          CONF_FILE="kernel-config/release/stable/config-6.18"
+          
+          if [ -f "$CONF_FILE" ]; then
+            echo "正在注入 daed 和 FullCone NAT 依赖配置..."
+            # 开启 eBPF/BTF/XDP 支持 (解决 kmod-sched-bpf, kmod-xdp-sockets-diag)
+            sed -i '/CONFIG_BPF_SYSCALL/d' $CONF_FILE
+            sed -i '/CONFIG_DEBUG_INFO_BTF/d' $CONF_FILE
+            echo "CONFIG_BPF_SYSCALL=y" >> $CONF_FILE
+            echo "CONFIG_BPF_JIT=y" >> $CONF_FILE
+            echo "CONFIG_BPF_EVENTS=y" >> $CONF_FILE
+            echo "CONFIG_DEBUG_INFO_BTF=y" >> $CONF_FILE
+            echo "CONFIG_NET_CLS_BPF=m" >> $CONF_FILE
+            echo "CONFIG_NET_ACT_BPF=m" >> $CONF_FILE
+            echo "CONFIG_XDP_SOCKETS=y" >> $CONF_FILE
+            echo "CONFIG_XDP_SOCKETS_DIAG=m" >> $CONF_FILE
+            # 开启 FullCone NAT 模块 (解决 kmod-ipt-fullconenat)
+            echo "CONFIG_IP_NF_TARGET_FULLCONENAT=m" >> $CONF_FILE
+          fi
+          
+          # 将修改后的配置移动到源码目录进行编译
+          cp $CONF_FILE linux/.config
           cd linux
-          # 生成基础配置
-          make defconfig 
-          
-          # 开启 eBPF 相关支持 (解决图片中 kmod-sched-bpf 和 kmod-xdp-sockets-diag 缺失)
-          ./scripts/config --enable CONFIG_BPF
-          ./scripts/config --enable CONFIG_BPF_SYSCALL
-          ./scripts/config --enable CONFIG_BPF_JIT
-          ./scripts/config --enable CONFIG_BPF_EVENTS
-          ./scripts/config --enable CONFIG_DEBUG_INFO_BTF
-          ./scripts/config --module CONFIG_NET_CLS_BPF
-          ./scripts/config --module CONFIG_NET_ACT_BPF
-          ./scripts/config --enable CONFIG_XDP_SOCKETS
-          ./scripts/config --module CONFIG_XDP_SOCKETS_DIAG
-          
-          # 开启 FullCone NAT 支持 (解决图片中 kmod-ipt-fullconenat 缺失)
-          ./scripts/config --module CONFIG_IP_NF_TARGET_FULLCONENAT
-          
-          # 应用并检查配置
           make olddefconfig
 
-      - name: Compile kernel
-        run: |
-          cd linux
-          # 开始编译 S912 适用的内核文件
-          make -j$(nproc) Image.gz modules dtbs
+      - name: Compile the kernel
+        uses: ophub/amlogic-s9xxx-armbian@main
+        with:
+          build_target: kernel
+          kernel_version: 6.18.y
+          kernel_auto: true
+          kernel_sign: -S912-daed-fullcone
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: S912-Kernel-Integrated
-          path: |
-            linux/arch/arm64/boot/Image.gz
-            linux/arch/arm64/boot/dts/amlogic/*.dtb
-            linux/.config
+          name: S912-Kernel-Standard-Integrated
+          path: output/kernel/*
