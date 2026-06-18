@@ -61,7 +61,7 @@ on:
       docker_image:
         description: "Select Armbian docker image"
         required: false
-        default: "trixie"
+        default: "resolute"
         type: choice
         options:
           - trixie
@@ -101,6 +101,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04-arm
     if: ${{ github.event.repository.owner.id == github.event.sender.id }}
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -135,19 +137,18 @@ jobs:
       - name: Create virtual disk for extended storage
         id: disk
         run: |
-          mnt_size=$(expr $(df -h /mnt | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 1)
-          root_size=$(expr $(df -h / | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 4)
-          sudo truncate -s "${mnt_size}"G /mnt/mnt.img
+          # Get available space in exact GB
+          root_avail=$(df --block-size=1G / | tail -1 | awk '{print $4}')
+          root_size=$(( root_avail - 4 ))
+          [[ "${root_size}" -gt 0 ]] || { echo "Error: Insufficient space on /: ${root_avail}G available"; exit 1; }
+
           sudo truncate -s "${root_size}"G /root.img
-          sudo losetup /dev/loop6 /mnt/mnt.img
-          sudo losetup /dev/loop7 /root.img
-          sudo pvcreate /dev/loop6
-          sudo pvcreate /dev/loop7
-          sudo vgcreate github /dev/loop6 /dev/loop7
-          sudo lvcreate -n runner -l 100%FREE github
-          sudo mkfs.xfs -f -i sparse=0 -b size=4096 /dev/github/runner
+          build_dev=$(sudo losetup --find --show /root.img)
+          echo "Using /: ${root_size}G"
+
+          sudo mkfs.xfs -f -i sparse=0 -b size=4096 "${build_dev}"
           sudo mkdir -p /builder
-          sudo mount /dev/github/runner /builder
+          sudo mount "${build_dev}" /builder
           sudo chown -R runner:runner /builder
           df -Th
           echo "status=success" >> ${GITHUB_OUTPUT}
@@ -196,20 +197,23 @@ jobs:
           docker_image: ophub/armbian-${{ inputs.docker_image }}:arm64
 
       - name: Upload Kernel to Release
-        uses: ncipollo/release-action@main
+        uses: ophub/upload-to-releases@main
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         with:
           tag: kernel_rk3588
           artifacts: ${{ env.PACKAGED_OUTPUTPATH }}/*
-          allowUpdates: true
-          removeArtifacts: false
-          replacesArtifacts: true
-          makeLatest: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          allow_updates: true
+          remove_artifacts: false
+          replaces_artifacts: true
+          make_latest: true
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
           body: |
             - These kernels can be used for `Armbian`, `OpenWrt` and `FnNAS`.
             - These are dedicated BSP kernels for `Rockchip rk3588` and are not compatible with other series.
             - Those with `flippy` in the filename are manually uploaded kernels maintained and shared by [flippy](https://github.com/unifreq), while the others are automatically compiled online.
+
+            <br />
+
             - 这些内核可用于 `Armbian`, `OpenWrt` 和 `FnNAS`。
             - 这些是 `Rockchip rk3588` 专用 BSP 内核，和其他系列不通用。
             - 其中名字里带有 `flippy` 的是手动上传的由 [flippy](https://github.com/unifreq) 大佬维护制作分享的内核，其他是在线自动编译的。
